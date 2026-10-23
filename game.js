@@ -10,6 +10,9 @@ const C = {
 };
 const S = 1.25; // 로봇 크기 배율
 const SAVE_KEY = 'ragdollRobotProto_v1';
+const HINTS_PER_STAGE = 2;   // 힌트: 별/탭 비용 없음, 스테이지당 2회
+const ORDER_PENALTY = 1;     // 순서 틀림: 블록은 안 빠지고 탭 +1
+const REPLAY_MAX_PRE = 3.6, REPLAY_POST = 0.8, REPLAY_SPEED = 0.45; // 마지막 탭 직전 ~ 착지/실패 0.8초 후(최대 4.4초)를 0.45배속
 
 /* ---------------- 사운드 (WebAudio 블립) ---------------- */
 const Sfx = {
@@ -50,14 +53,15 @@ const Save = {
 /* ---------------- 스테이지 (월드 1, 1~5) ---------------- */
 // t3: 별 3개 기준 탭 수, t2: 별 2개 기준 탭 수, limit: 탭 한도
 const STAGES = [
-  { id: 1, name: '첫 낙하', t3: 1, t2: 2, limit: 4, hint: '로봇 아래 나무 블록을 탭해 보세요.', tutorial: 'w1',
+  { id: 1, name: '첫 낙하', t3: 1, t2: 2, limit: 4, hint: '로봇 아래 나무 블록을 탭해 보세요.', tutorial: 'w1', hintSeq: [['w1', 'up']],
     robot: [360, 600],
     items: [
       { t: 'stone', x: 180, y: 950, w: 120, h: 460 }, { t: 'stone', x: 540, y: 950, w: 120, h: 460 },
       { t: 'wood', id: 'w1', x: 360, y: 695, w: 420, h: 50 },
       { t: 'cushion', x: 360, y: 1155, w: 220, h: 50 },
     ] },
-  { id: 2, name: '순서가 중요해', t3: 3, t2: 4, limit: 6, hint: '아래 블록부터 빼면 탑이 무너져요. 위에서부터 하나씩!',
+  { id: 2, name: '순서가 중요해', t3: 3, t2: 4, limit: 6, hint: '블록에 적힌 숫자 순서(1→2→3)대로 위에서부터 빼세요. 순서가 틀리면 탭 +1 벌칙!',
+    order: ['t', 'm', 'b'], hintSeq: [['t', 'right'], ['m', 'right'], ['b', 'right']],
     robot: [360, 818],
     items: [
       { t: 'cushion', x: 360, y: 1155, w: 300, h: 50 },
@@ -65,7 +69,7 @@ const STAGES = [
       { t: 'wood', id: 'm', x: 360, y: 1010, w: 84, h: 80 },
       { t: 'wood', id: 't', x: 360, y: 930, w: 84, h: 80 },
     ] },
-  { id: 3, name: '돌 등장', t3: 1, t2: 2, limit: 4, hint: '돌은 없앨 수 없어요. 판자를 받친 나무 기둥을 빼 보세요.',
+  { id: 3, name: '돌 등장', t3: 1, t2: 2, limit: 4, hint: '돌은 없앨 수 없어요. 판자를 받친 나무 기둥을 빼 보세요.', hintSeq: [['post', 'left']],
     robot: [250, 610],
     items: [
       { t: 'stone', x: 90, y: 945, w: 80, h: 490 },
@@ -74,7 +78,7 @@ const STAGES = [
       { t: 'wood', id: 'decoy', x: 650, y: 1120, w: 70, h: 120 },
       { t: 'cushion', x: 300, y: 1155, w: 280, h: 50 },
     ] },
-  { id: 4, name: '시소', t3: 1, t2: 2, limit: 4, hint: '반대쪽 끝의 무거운 나무 상자를 빼면 판자가 로봇 쪽으로 기울어요.',
+  { id: 4, name: '시소', t3: 1, t2: 2, limit: 4, hint: '반대쪽 끝의 무거운 나무 상자를 빼면 판자가 로봇 쪽으로 기울어요.', hintSeq: [['box', 'down']],
     robot: [235, 790],
     items: [
       { t: 'fulcrum', x: 360, y: 1040, w: 120, h: 280 },
@@ -83,7 +87,7 @@ const STAGES = [
       { t: 'wood', id: 'box', x: 525, y: 822, w: 110, h: 90 },
       { t: 'cushion', x: 130, y: 1155, w: 230, h: 50 },
     ] },
-  { id: 5, name: '쾅!', t3: 1, t2: 2, limit: 4, hint: '폭탄은 반대쪽으로 밀어내요. 어느 쪽 폭탄을 터뜨릴까요?',
+  { id: 5, name: '쾅!', t3: 1, t2: 2, limit: 4, hint: '폭탄은 반대쪽으로 밀어내요. 어느 쪽 폭탄을 터뜨릴까요?', hintSeq: [['br', 'down']],
     robot: [360, 710],
     items: [
       { t: 'stone', x: 360, y: 800, w: 260, h: 40 },
@@ -357,7 +361,29 @@ class Robot {
     let tilt = this.slosh + Math.sin(this.time * 1.6) * 0.05; if (this.expr === 'scared') tilt += Math.sin(this.time * 45) * 0.08;
     tilt = Phaser.Math.Clamp(tilt, -0.9, 0.9);
     this.flash = Math.max(0, this.flash - s * 5);
+    this.lastTilt = tilt;
     this.drawJuice(tilt);
+  }
+  // 리플레이용: 화면에 보이는 상태만 기록/재생(물리 바디는 건드리지 않음)
+  snap() {
+    const tr = (o) => [o.x, o.y, o.rotation, o.scaleX, o.scaleY];
+    return { tc: tr(this.torsoC), hc: tr(this.headC),
+      limbs: [this.armLi, this.armRi, this.footLi, this.footRi].map(i => [i.x, i.y, i.rotation]),
+      ears: [this.earL.rotation, this.earR.rotation],
+      links: this.links.map(l => { const a = this.worldPt(l.bodyA, l.pointA), b = this.worldPt(l.bodyB, l.pointB); return [a.x, a.y, b.x, b.y]; }),
+      sh: [this.shadow.x, this.shadow.y, this.shadow.scaleX, this.shadow.alpha],
+      expr: this.expr, exprT: this.exprT, juice: this.juice, tilt: this.lastTilt || 0, flash: this.flash };
+  }
+  applySnap(f) {
+    const tr = (o, v) => o.setPosition(v[0], v[1]).setRotation(v[2]).setScale(v[3], v[4]);
+    tr(this.torsoC, f.tc); tr(this.headC, f.hc);
+    [this.armLi, this.armRi, this.footLi, this.footRi].forEach((i, k) => i.setPosition(f.limbs[k][0], f.limbs[k][1]).setRotation(f.limbs[k][2]));
+    this.earL.setRotation(f.ears[0]); this.earR.setRotation(f.ears[1]);
+    const g = this.glow; g.clear();
+    f.links.forEach(([ax, ay, bx, by]) => { g.lineStyle(10, C.link, 0.18).lineBetween(ax, ay, bx, by); g.lineStyle(4, C.link, 0.5).lineBetween(ax, ay, bx, by); g.fillStyle(C.link, 0.6).fillCircle(ax, ay, 3); });
+    this.shadow.setPosition(f.sh[0], f.sh[1]).setScale(f.sh[2]).setAlpha(f.sh[3]);
+    this.expr = f.expr; this.exprT = f.exprT; this.juice = f.juice; this.flash = f.flash;
+    this.drawFace(); this.drawJuice(f.tilt);
   }
   drawJuice(tilt) {
     const g = this.juiceG; g.clear();
@@ -455,6 +481,7 @@ class GameScene extends Phaser.Scene {
     const MB = Phaser.Physics.Matter.Matter;
     this.matter.world.engine.positionIterations = 10; this.matter.world.engine.velocityIterations = 8;
     this.state = 'play'; this.taps = 0; this.restT = 0; this.idleT = 0; this.blocks = []; this.cushions = [];
+    this.penalties = 0; this.hintsLeft = HINTS_PER_STAGE; this.hintsUsed = 0; this.rec = []; this.recEvents = []; this.recObjs = []; this.recording = true; this.replaying = false; this.resultObjs = null;
     this.floor = this.matter.add.rectangle(W / 2, FLOOR_Y + 50, W * 3, 100, { isStatic: true, label: 'floor', friction: 0.9 });
     this.st.items.forEach(it => this.addItem(it));
     this.robot = new Robot(this, this.st.robot[0], this.st.robot[1]); this.robot.groundY = FLOOR_Y;
@@ -468,9 +495,71 @@ class GameScene extends Phaser.Scene {
       this.hand = this.add.text(b.x + 60, b.y + 30, '👆 탭!', { fontFamily: FONT, fontSize: '40px', fontStyle: 'bold', color: '#ffffff', stroke: '#FF8A1F', strokeThickness: 8 }).setDepth(60);
       this.tweens.add({ targets: this.hand, y: b.y + 50, yoyo: true, repeat: -1, duration: 450 });
     }
+    if (this.st.order) { this.refreshBadges(); this.time.delayedCall(450, () => { if (this.state === 'play' && this.taps === 0) this.toast('블록의 숫자 순서대로 빼세요! 순서가 틀리면 탭 +1'); }); }
     this.cameras.main.fadeIn(250);
     this.exposeState();
   }
+  /* ---- 순서 규칙 ---- */
+  nextOrderId() { if (!this.st.order) return null; return this.st.order.find(id => this.blocks.some(b => b.bid === id && b.active)) || null; }
+  refreshBadges() {
+    const next = this.nextOrderId();
+    this.blocks.forEach(b => { if (!b.badge) return; const on = b.bid === next; b.badge.ring.setFillStyle(on ? 0xFF8A1F : 0xFFFFFF, 1); b.badge.txt.setColor(on ? '#ffffff' : '#B9773F');
+      if (on && !b.badge.pulse) b.badge.pulse = this.tweens.add({ targets: b.badge, scale: 1.18, yoyo: true, repeat: -1, duration: 420 }); });
+  }
+  wrongOrder(obj) {
+    Sfx.tone(220, 140, 0.22, 'square', 0.08); this.cameras.main.shake(160, 0.006);
+    this.robot.sloshV += 0.25; this.robot.flash = 1;
+    obj.setTint(0xFF7B7B); this.time.delayedCall(450, () => { if (obj.active) obj.clearTint(); });
+    const x = obj.x, y = obj.y;
+    const mark = this.add.text(x, y, '✕', { fontFamily: FONT, fontSize: '64px', fontStyle: 'bold', color: '#E8483B', stroke: '#ffffff', strokeThickness: 8 }).setOrigin(0.5).setDepth(60);
+    this.tweens.add({ targets: mark, x: { from: x - 10, to: x + 10 }, duration: 60, yoyo: true, repeat: 3, onComplete: () => this.tweens.add({ targets: mark, alpha: 0, y: y - 30, duration: 300, onComplete: () => mark.destroy() }) });
+    const pen = this.add.text(x + 70, y - 40, `탭 +${ORDER_PENALTY}`, { fontFamily: FONT, fontSize: '34px', fontStyle: 'bold', color: '#E8483B', stroke: '#ffffff', strokeThickness: 7 }).setOrigin(0.5).setDepth(60);
+    this.tweens.add({ targets: pen, y: y - 100, alpha: 0, delay: 500, duration: 700, onComplete: () => pen.destroy() });
+    this.flashTapText();
+    const nb = this.blocks.find(b => b.bid === this.nextOrderId());
+    this.toast(`순서가 틀렸어요! ${nb && nb.badge ? nb.badge.num + '번' : '숫자 순서대로'} 블록부터 빼세요 (탭 +${ORDER_PENALTY})`);
+  }
+  flashTapText() { this.tapText.setColor('#E8483B'); this.tweens.add({ targets: this.tapText, scale: 1.25, yoyo: true, duration: 120 }); this.time.delayedCall(700, () => this.tapText.setColor('#FF8A1F')); }
+  /* ---- 힌트 화살표 ---- */
+  hintTarget() {
+    const ok = (id) => this.blocks.some(b => b.bid === id && b.active);
+    if (this.st.order) { const id = this.nextOrderId(); const e = (this.st.hintSeq || []).find(h => h[0] === id) || [id, 'right']; return id ? e : null; }
+    return (this.st.hintSeq || []).find(h => ok(h[0])) || null;
+  }
+  useHint() {
+    if (this.state !== 'play' || this.replaying) return;
+    if (this.hintsLeft <= 0) { this.toast('이 스테이지의 힌트 화살표를 다 썼어요.\n' + this.st.hint); return; }
+    const h = this.hintTarget(); if (!h) { this.toast(this.st.hint); return; }
+    this.hintsLeft--; this.hintsUsed++; this.updateHintBtn();
+    this.toast(this.st.hint);
+    this.showArrow(this.blocks.find(b => b.bid === h[0]), h[1]);
+    this.exposeState();
+  }
+  showArrow(obj, dir) {
+    this.clearArrow(); if (!obj) return;
+    const c = this.add.container(0, 0).setDepth(65);
+    const g = this.add.graphics();
+    // 오른쪽을 가리키는 기본 화살표(끝점이 원점)
+    g.fillStyle(0xE0650F, 1).fillPoints([{ x: -86, y: -13 }, { x: -36, y: -13 }, { x: -36, y: -32 }, { x: 4, y: 3 }, { x: -36, y: 38 }, { x: -36, y: 19 }, { x: -86, y: 19 }], true);
+    g.fillStyle(0xFF8A1F, 1).fillPoints([{ x: -90, y: -16 }, { x: -40, y: -16 }, { x: -40, y: -36 }, { x: 0, y: 0 }, { x: -40, y: 36 }, { x: -40, y: 16 }, { x: -90, y: 16 }], true);
+    g.lineStyle(5, 0xffffff, 1).strokePoints([{ x: -90, y: -16 }, { x: -40, y: -16 }, { x: -40, y: -36 }, { x: 0, y: 0 }, { x: -40, y: 36 }, { x: -40, y: 16 }, { x: -90, y: 16 }], true);
+    c.add(g); c.rotation = { right: 0, left: Math.PI, down: Math.PI / 2, up: -Math.PI / 2 }[dir] || 0;
+    const ring = this.add.graphics().setDepth(64);
+    this.arrow = { c, ring, obj, dir, t: 0, life: 4.0 };
+    this.positionArrow(0);
+  }
+  positionArrow(dt) {
+    const a = this.arrow; if (!a) return;
+    a.t += dt / 1000;
+    if (!a.obj.active || a.t > a.life) { this.clearArrow(); return; }
+    const o = a.obj, hw = o.displayWidth / 2, hh = o.displayHeight / 2, bob = 10 + Math.sin(a.t * 9) * 10;
+    const off = { right: [-hw - bob, 0], left: [hw + bob, 0], down: [0, -hh - bob], up: [0, hh + bob] }[a.dir] || [-hw - bob, 0];
+    a.c.setPosition(o.x + off[0], o.y + off[1]).setAlpha(a.t > a.life - 0.4 ? (a.life - a.t) / 0.4 : 1);
+    const pr = (a.t * 1.6) % 1;
+    a.ring.clear().lineStyle(6 * (1 - pr) + 1, 0xFF8A1F, 0.9 * (1 - pr)).strokeRoundedRect(o.x - hw - 6 - pr * 18, o.y - hh - 6 - pr * 18, o.displayWidth + 12 + pr * 36, o.displayHeight + 12 + pr * 36, 14);
+  }
+  clearArrow() { if (this.arrow) { this.arrow.c.destroy(); this.arrow.ring.destroy(); this.arrow = null; } }
+  updateHintBtn() { if (this.hintBadge) { this.hintBadgeT.setText(String(this.hintsLeft)); this.hintBadge.setAlpha(this.hintsLeft > 0 ? 1 : 0.45); this.hintBtn.setAlpha(this.hintsLeft > 0 ? 1 : 0.6); } }
   addItem(it) {
     const M = this.matter; let obj;
     if (it.t === 'stone') { obj = M.add.image(it.x, it.y, blockTex(this, 'stone', it.w, it.h), null, { isStatic: true, label: 'stone', friction: 0.8 }); }
@@ -488,6 +577,13 @@ class GameScene extends Phaser.Scene {
       obj = this.add.image(it.x, it.y, blockTex(this, 'fulcrum', it.w, it.h));
     }
     obj.setDepth(it.t === 'cushion' ? 8 : 15); obj.bid = it.id; obj.kind = it.t;
+    if (obj.body && !obj.body.isStatic) { obj.recIdx = this.recObjs.length; this.recObjs.push({ obj, key: obj.texture.key, depth: obj.depth }); }
+    if (this.st.order && this.st.order.includes(it.id)) {
+      const num = this.st.order.indexOf(it.id) + 1;
+      const ring = this.add.circle(0, 0, 21, 0xffffff, 1).setStrokeStyle(4, 0xB9773F);
+      const txt = this.add.text(0, 0, String(num), { fontFamily: FONT, fontSize: '28px', fontStyle: 'bold', color: '#B9773F' }).setOrigin(0.5);
+      obj.badge = this.add.container(it.x, it.y, [ring, txt]).setDepth(16); obj.badge.ring = ring; obj.badge.txt = txt; obj.badge.num = num;
+    }
     if (obj.removable) {
       obj.setInteractive({ useHandCursor: true });
       obj.on('pointerdown', () => this.tapBlock(obj));
@@ -500,7 +596,9 @@ class GameScene extends Phaser.Scene {
     g.fillStyle(0xffffff, 0.88).fillRoundedRect(16, 16, W - 32, 150, 30);
     button(this, 74, 74, 84, 84, 'Ⅱ', () => this.scene.start('Select'), { size: 36, color: 0x8FD3FF, shade: 0x5AA9DD, depth: 81 });
     button(this, W - 168, 74, 84, 84, '↻', () => this.scene.restart({ idx: this.idx }), { size: 44, color: 0xFF9EC7, shade: 0xE07AA6, depth: 81 });
-    button(this, W - 74, 74, 84, 84, '?', () => this.toast(this.st.hint), { size: 44, color: 0xFFD95A, shade: 0xE0A93A, text: '#7a4a12', depth: 81 });
+    this.hintBtn = button(this, W - 74, 74, 84, 84, '힌트', () => this.useHint(), { size: 26, color: 0xFFD95A, shade: 0xE0A93A, text: '#7a4a12', depth: 81 });
+    this.hintBadge = this.add.circle(W - 36, 36, 17, 0xFF8A1F).setStrokeStyle(3, 0xffffff).setDepth(83);
+    this.hintBadgeT = this.add.text(W - 36, 35, String(this.hintsLeft), { fontFamily: FONT, fontSize: '22px', fontStyle: 'bold', color: '#ffffff' }).setOrigin(0.5).setDepth(84);
     this.add.text(140, 34, `1-${this.st.id} ${this.st.name}`, { fontFamily: FONT, fontSize: '30px', fontStyle: 'bold', color: '#3b3f4a' }).setDepth(81);
     this.tapText = this.add.text(140, 76, '', { fontFamily: FONT, fontSize: '30px', fontStyle: 'bold', color: '#FF8A1F' }).setDepth(81);
     this.nextText = this.add.text(140, 118, '', { fontFamily: FONT, fontSize: '22px', color: '#5b4a3a' }).setDepth(81);
@@ -524,12 +622,20 @@ class GameScene extends Phaser.Scene {
     if (this.state !== 'play' || !obj.active) return;
     Sfx.init();
     if (this.taps >= this.st.limit) { this.toast('탭을 다 썼어요! 다시하기를 눌러 보세요'); return; }
-    this.taps++; if (this.hand) { this.hand.destroy(); this.hand = null; }
+    if (this.st.order && obj.bid !== this.nextOrderId()) { // 순서 틀림: 블록은 그대로, 탭 +1
+      this.taps = Math.min(this.st.limit, this.taps + ORDER_PENALTY); this.penalties++;
+      this.wrongOrder(obj); this.updateHud(); this.exposeState(); return;
+    }
+    this.taps++; this.lastTapT = this.time.now; if (this.hand) { this.hand.destroy(); this.hand = null; }
     if (obj.bomb) this.explode(obj); else this.removeBlock(obj, true);
+    if (this.st.order) this.refreshBadges();
     this.updateHud(); this.exposeState();
   }
   removeBlock(obj, sound) {
     if (!obj.active) return;
+    if (this.recording) this.recEvents.push({ t: this.time.now, type: 'pop', x: obj.x, y: obj.y });
+    if (obj.badge) { obj.badge.destroy(); obj.badge = null; }
+    if (this.arrow && this.arrow.obj === obj) this.clearArrow();
     if (sound) Sfx.pop();
     const x = obj.x, y = obj.y;
     for (let i = 0; i < 8; i++) { const p = this.add.rectangle(x + Phaser.Math.Between(-obj.displayWidth / 3, obj.displayWidth / 3), y, 10, 10, 0xD3965A).setDepth(30); this.tweens.add({ targets: p, x: p.x + Phaser.Math.Between(-60, 60), y: p.y + Phaser.Math.Between(-80, 20), angle: 180, alpha: 0, duration: 450, onComplete: () => p.destroy() }); }
@@ -543,6 +649,7 @@ class GameScene extends Phaser.Scene {
     const MB = Phaser.Physics.Matter.Matter.Body;
     const x = obj.x, y = obj.y, R = 230;
     this.removeBlock(obj, false); Sfx.boom();
+    if (this.recording) this.recEvents.push({ t: this.time.now, type: 'boom', x, y });
     this.cameras.main.shake(350, 0.02);
     const fl = this.add.circle(x, y, 30, 0xFFD95A, 0.9).setDepth(40); this.tweens.add({ targets: fl, scale: 6, alpha: 0, duration: 380, onComplete: () => fl.destroy() });
     const ring = this.add.circle(x, y, 40).setStrokeStyle(10, 0xFF8A1F).setDepth(40); this.tweens.add({ targets: ring, scale: 4, alpha: 0, duration: 400, onComplete: () => ring.destroy() });
@@ -577,9 +684,12 @@ class GameScene extends Phaser.Scene {
   }
   update(time, dt) {
     if (!this.robot) return;
+    if (this.replaying) { this.stepReplay(dt); return; }
     this.robot.update(dt);
+    if (this.recording) this.recordFrame();
     this.exposeState();
-    this.blocks.forEach(b => { if (b.fuse && b.active) b.fuse.setPosition(b.x + 10 + Math.cos(b.rotation) * 0, b.y - 28); });
+    this.blocks.forEach(b => { if (b.fuse && b.active) b.fuse.setPosition(b.x + 10 + Math.cos(b.rotation) * 0, b.y - 28); if (b.badge && b.active) b.badge.setPosition(b.x, b.y).setRotation(b.rotation); });
+    this.positionArrow(dt);
     if (this.state !== 'play') return;
     const r = this.robot; const sp0 = r.maxSpeed(); this.spAvg = this.spAvg === undefined ? sp0 : this.spAvg * 0.85 + sp0 * 0.15; const sp = this.spAvg;
     // 화면 밖 = 실패
@@ -599,17 +709,17 @@ class GameScene extends Phaser.Scene {
     if (this.taps >= this.st.limit && sp < 0.6 && !onC) { this.idleT += dt / 1000; if (this.idleT > 2) this.fail('탭을 다 썼어요'); } else this.idleT = 0;
   }
   clear() {
-    this.state = 'clear'; const r = this.robot; r.setExpr('happy'); if (this.restBar) this.restBar.clear();
+    this.state = 'clear'; this.keyT = this.time.now - 1500; const r = this.robot; r.setExpr('happy'); if (this.restBar) this.restBar.clear();
     const stars = this.starsNow(); Save.setStars(this.st.id, stars); Sfx.clear();
     r.juiceTarget = stars / 3 + 0.001; // 받은 별 수만큼 차오름
     for (let i = 0; i < 6; i++) { const bb = this.add.circle(r.torso.position.x + Phaser.Math.Between(-5, 5), r.torso.position.y, 2.5, 0xffffff, 0.8).setDepth(25); this.tweens.add({ targets: bb, y: bb.y - 30, alpha: 0, delay: i * 120, duration: 500, onComplete: () => bb.destroy() }); }
-    const bub = this.add.text(r.head.position.x + 70, r.head.position.y - 90, '휴...', { fontFamily: FONT, fontSize: '34px', fontStyle: 'bold', color: '#3b3f4a', backgroundColor: '#ffffff', padding: { x: 18, y: 10 } }).setDepth(70).setOrigin(0.5);
+    const bub = this.add.text(r.head.position.x + 70, r.head.position.y - 90, '휴...', { fontFamily: FONT, fontSize: '34px', fontStyle: 'bold', color: '#3b3f4a', backgroundColor: '#ffffff', padding: { x: 18, y: 10 } }).setDepth(70).setOrigin(0.5); bub.isSpeech = true;
     this.time.delayedCall(700, () => this.showResult(true, stars));
     this.exposeState();
   }
   fail(reason) {
     if (this.state !== 'play') return;
-    this.state = 'fail'; this.robot.setExpr('dizzy'); this.robot.juiceTarget = 0; Sfx.fail(); Sfx.gulp();
+    this.state = 'fail'; this.keyT = this.time.now; this.robot.setExpr('dizzy'); this.robot.juiceTarget = 0; Sfx.fail(); Sfx.gulp();
     this.cameras.main.shake(250, 0.015);
     this.time.delayedCall(500, () => this.time.timeScale = 1);
     this.failReason = reason;
@@ -617,6 +727,8 @@ class GameScene extends Phaser.Scene {
     this.exposeState();
   }
   showResult(win, stars, reason) {
+    this.recording = false; this.clearArrow();
+    const before = new Set(this.children.list);
     const g = this.add.graphics().setDepth(100);
     g.fillStyle(0x1B2533, 0.45).fillRect(0, 0, W, H);
     g.fillStyle(0xffffff, 0.97).fillRoundedRect(80, 300, 560, win ? 560 : 540, 40);
@@ -627,19 +739,83 @@ class GameScene extends Phaser.Scene {
       for (let k = 0; k < 3; k++) this.time.delayedCall(250 + k * 280, () => { starShape(sg, W / 2 - 110 + k * 110, 490, 46, k < stars ? 0xFFB224 : 0xD9D9D9); if (k < stars) Sfx.star(k); });
       this.add.text(W / 2, 580, `탭 ${this.taps}번 · 별 3개 기준 ${this.st.t3}번`, { fontFamily: FONT, fontSize: '28px', color: '#5b4a3a' }).setOrigin(0.5).setDepth(101);
       const hasNext = this.idx < STAGES.length - 1;
-      button(this, W / 2, 680, 400, 110, hasNext ? '다음 스테이지' : '스테이지 선택', () => hasNext ? this.scene.start('Game', { idx: this.idx + 1 }) : this.scene.start('Select'), { size: 40, depth: 102 }).name = 'btnNext';
-      button(this, W / 2 - 110, 790, 190, 70, '다시하기', () => this.scene.restart({ idx: this.idx }), { size: 28, color: 0xFF9EC7, shade: 0xE07AA6, depth: 102 });
-      button(this, W / 2 + 110, 790, 190, 70, '선택', () => this.scene.start('Select'), { size: 28, color: 0x8FD3FF, shade: 0x5AA9DD, depth: 102 });
+      if (this.penalties || this.hintsUsed) this.add.text(W / 2, 620, [this.penalties ? `순서 벌칙 +${this.penalties * ORDER_PENALTY}탭` : '', this.hintsUsed ? `힌트 ${this.hintsUsed}회 사용(무료)` : ''].filter(Boolean).join(' · '), { fontFamily: FONT, fontSize: '22px', color: '#9a7a6a' }).setOrigin(0.5).setDepth(101);
+      button(this, W / 2, 690, 400, 100, hasNext ? '다음 스테이지' : '스테이지 선택', () => hasNext ? this.scene.start('Game', { idx: this.idx + 1 }) : this.scene.start('Select'), { size: 40, depth: 102 }).name = 'btnNext';
+      button(this, W / 2 - 175, 800, 160, 70, '리플레이', () => this.startReplay(), { size: 26, color: 0xFFD95A, shade: 0xE0A93A, text: '#7a4a12', depth: 102 }).name = 'btnReplay';
+      button(this, W / 2, 800, 160, 70, '다시하기', () => this.scene.restart({ idx: this.idx }), { size: 26, color: 0xFF9EC7, shade: 0xE07AA6, depth: 102 });
+      button(this, W / 2 + 175, 800, 160, 70, '선택', () => this.scene.start('Select'), { size: 26, color: 0x8FD3FF, shade: 0x5AA9DD, depth: 102 });
     } else {
       this.add.text(W / 2, 470, reason || '', { fontFamily: FONT, fontSize: '32px', color: '#5b4a3a' }).setOrigin(0.5).setDepth(101);
       this.add.text(W / 2, 520, '힌트: ' + this.st.hint, { fontFamily: FONT, fontSize: '24px', color: '#7a6a5a', wordWrap: { width: 480 }, align: 'center' }).setOrigin(0.5, 0).setDepth(101);
       button(this, W / 2, 660, 400, 110, '다시하기', () => this.scene.restart({ idx: this.idx }), { size: 40, depth: 102 }).name = 'btnRetry';
-      button(this, W / 2, 768, 260, 80, '스테이지 선택', () => this.scene.start('Select'), { size: 30, color: 0x8FD3FF, shade: 0x5AA9DD, depth: 102 });
+      button(this, W / 2 - 115, 770, 210, 76, '리플레이', () => this.startReplay(), { size: 28, color: 0xFFD95A, shade: 0xE0A93A, text: '#7a4a12', depth: 102 }).name = 'btnReplay';
+      button(this, W / 2 + 115, 770, 210, 76, '스테이지 선택', () => this.scene.start('Select'), { size: 26, color: 0x8FD3FF, shade: 0x5AA9DD, depth: 102 });
     }
+    this.resultObjs = this.children.list.filter(o => !before.has(o));
+    this.exposeState();
+  }
+  /* ---- 슬로모션 리플레이 ---- */
+  recordFrame() {
+    const now = this.time.now;
+    const objs = []; this.recObjs.forEach((r, i) => { const o = r.obj; if (o.active) objs.push([i, o.x, o.y, o.rotation]); });
+    this.rec.push({ t: now, r: this.robot.snap(), o: objs });
+    const cut = now - 6000; while (this.rec.length && this.rec[0].t < cut) this.rec.shift();
+    while (this.recEvents.length && this.recEvents[0].t < cut) this.recEvents.shift();
+  }
+  startReplay() {
+    if (this.replaying || this.rec.length < 2) return;
+    const last = this.rec[this.rec.length - 1].t, key = this.keyT || last;
+    const end = Math.min(last, key + REPLAY_POST * 1000);
+    const start = Math.max(this.rec[0].t, key - REPLAY_MAX_PRE * 1000, Math.min(key - 1000, (this.lastTapT || 0) - 300));
+    this.replaying = true; this.rp = { start, end, t: start, i: 0, ev: 0 };
+    this.matter.world.pause();
+    (this.resultObjs || []).forEach(o => o.setVisible(false));
+    [this.toastObj, this.restBar].forEach(o => o && o.active && o.setVisible(false));
+    this.children.list.filter(o => o.isSpeech).forEach(o => o.setVisible(false));
+    this.recObjs.forEach(r => { if (r.obj.active) { r.obj.setVisible(false); if (r.obj.fuse) r.obj.fuse.setVisible(false); if (r.obj.badge) r.obj.badge.setVisible(false); } });
+    this.ghosts = this.recObjs.map(r => this.add.image(0, 0, r.key).setDepth(r.depth).setVisible(false));
+    const ui = this.add.container(0, 0).setDepth(120);
+    const bars = this.add.graphics(); bars.fillStyle(0x0B0F14, 0.82).fillRect(0, 0, W, 120).fillRect(0, H - 110, W, 110);
+    const rec = this.add.circle(48, 60, 12, 0xE8483B); this.tweens.add({ targets: rec, alpha: 0.2, yoyo: true, repeat: -1, duration: 400 });
+    const t1 = this.add.text(72, 60, `슬로 리플레이 ${REPLAY_SPEED}×`, { fontFamily: FONT, fontSize: '34px', fontStyle: 'bold', color: '#FFD27A' }).setOrigin(0, 0.5);
+    const t2 = this.add.text(W / 2, H - 55, '화면을 탭하면 결과로 돌아가요', { fontFamily: FONT, fontSize: '26px', color: '#ffffff' }).setOrigin(0.5);
+    const prog = this.add.graphics();
+    const zone = this.add.zone(W / 2, H / 2, W, H).setInteractive();
+    zone.on('pointerup', () => this.endReplay());
+    ui.add([bars, rec, t1, t2, prog, zone]); this.rp.ui = ui; this.rp.prog = prog;
+    this.stepReplay(0); this.exposeState();
+  }
+  stepReplay(dt) {
+    const rp = this.rp; rp.t += dt * REPLAY_SPEED;
+    if (rp.t >= rp.end) { rp.t = rp.end; if (!rp.done) { rp.done = true; this.time.delayedCall(450, () => { if (this.rp === rp) this.endReplay(); }); } }
+    while (rp.i < this.rec.length - 1 && this.rec[rp.i + 1].t <= rp.t) rp.i++;
+    while (rp.i > 0 && this.rec[rp.i].t > rp.t) rp.i--;
+    const f = this.rec[rp.i]; if (!f) return;
+    this.robot.applySnap(f.r);
+    this.ghosts.forEach(gh => gh.setVisible(false));
+    f.o.forEach(([i, x, y, r]) => this.ghosts[i].setVisible(true).setPosition(x, y).setRotation(r));
+    while (rp.ev < this.recEvents.length && this.recEvents[rp.ev].t <= rp.t) { const e = this.recEvents[rp.ev++]; if (e.t >= rp.start) this.replayFx(e); }
+    rp.prog.clear().fillStyle(0xffffff, 0.25).fillRoundedRect(40, 100, W - 80, 8, 4).fillStyle(0xFF8A1F, 1).fillRoundedRect(40, 100, (W - 80) * (rp.t - rp.start) / Math.max(1, rp.end - rp.start), 8, 4);
+  }
+  replayFx(e) {
+    if (e.type === 'pop') { Sfx.pop(); const c = this.add.circle(e.x, e.y, 20, 0xFFE6B0, 0.9).setDepth(40); this.tweens.add({ targets: c, scale: 3, alpha: 0, duration: 900, onComplete: () => c.destroy() }); }
+    else { Sfx.boom(); this.cameras.main.shake(500, 0.012); const c = this.add.circle(e.x, e.y, 30, 0xFFD95A, 0.9).setDepth(40); this.tweens.add({ targets: c, scale: 6, alpha: 0, duration: 950, onComplete: () => c.destroy() }); }
+  }
+  endReplay() {
+    if (!this.replaying) return;
+    this.replaying = false;
+    this.rp.ui.destroy(); this.ghosts.forEach(g => g.destroy()); this.ghosts = null;
+    this.recObjs.forEach(r => { if (r.obj.active) { r.obj.setVisible(true); if (r.obj.fuse) r.obj.fuse.setVisible(true); if (r.obj.badge) r.obj.badge.setVisible(true); } });
+    this.children.list.filter(o => o.isSpeech).forEach(o => o.setVisible(true));
+    (this.resultObjs || []).forEach(o => o.active && o.setVisible(true));
+    this.matter.world.resume();
+    this.robot.update(0);
     this.exposeState();
   }
   exposeState() {
     window.__STATE = { scene: 'Game', stage: this.st.id, state: this.state, taps: this.taps, stars: this.starsNow(),
+      penalties: this.penalties, hintsLeft: this.hintsLeft, hintsUsed: this.hintsUsed, nextOrder: this.nextOrderId(), arrow: this.arrow ? this.arrow.obj.bid : null,
+      replaying: this.replaying, recFrames: this.rec ? this.rec.length : 0, result: !!this.resultObjs,
       dbg: this.dbg, blocks: this.blocks.filter(b => b.active && b.removable).map(b => ({ id: b.bid, x: b.x, y: b.y, kind: b.kind })) };
   }
 }
