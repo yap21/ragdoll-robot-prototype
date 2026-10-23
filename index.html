@@ -11,10 +11,13 @@
   html,body{margin:0;padding:0;height:100%;background:#2b3a4a;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
   #game{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
   canvas{display:block}
+  @font-face{font-family:'Jua';src:url('assets/jua.woff') format('woff');font-display:block}
+  #fontwarm{position:absolute;left:-999px;top:0;font-family:'Jua';font-size:20px;opacity:0}
 </style>
 </head>
 <body>
 <div id="game"></div>
+<div id="fontwarm">러그돌 로봇 0123</div>
 <script src="phaser.min.js"></script>
 <script src="game.js"></script>
 </body>
